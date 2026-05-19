@@ -31,8 +31,21 @@
 //   stored sessions and full milestone trajectories.
 //   To remove: window._mywMonitor.destroy()
 
-(function installMonitor() {
+(async function installMonitor() {
     'use strict';
+
+    function waitFor(predicate, timeoutMs = 120000) {
+        return new Promise((resolve, reject) => {
+            const start = Date.now();
+            const tick = () => {
+                const val = predicate();
+                if (val) return resolve(val);
+                if (Date.now() - start >= timeoutMs) return reject(new Error('waitFor: timeout'));
+                setTimeout(tick, 500);
+            };
+            tick();
+        });
+    }
 
     // -------------------------------------------------------------------------
     // Config
@@ -76,15 +89,15 @@
     // -------------------------------------------------------------------------
     // App handles
     // -------------------------------------------------------------------------
-    const app = window.myw?.app;
-    if (!app) {
-        console.error('[myw-monitor] window.myw.app not found - is the app fully loaded?');
-        return;
-    }
-
-    const tabControl = app.layout?.controls?.tabControl;
-    if (!tabControl) {
-        console.error('[myw-monitor] tabControl not found on app.layout.controls');
+    let app, tabControl;
+    try {
+        ({ app, tabControl } = await waitFor(() => {
+            const a = window.myw?.app;
+            const tc = a?.layout?.controls?.tabControl;
+            return (a && tc) ? { app: a, tabControl: tc } : null;
+        }));
+    } catch (_) {
+        console.error('[myw-monitor] App or tabControl not found after waiting - is this an IQGeo app page?');
         return;
     }
 
