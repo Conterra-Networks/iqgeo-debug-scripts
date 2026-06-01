@@ -230,20 +230,52 @@
     }
 
     function getVectorCacheSummary(map) {
-        let featureCount = 0;
+        let sharedVectorFeatures = 0;
+        let markerFeatures = 0;
+        let featureRepUrns = 0;
+        let featureRepInstances = 0;
         let layerCount = 0;
 
         for (const layer of map?.getLayers?.().getArray?.() ?? []) {
             if (layer._features instanceof Map) {
-                featureCount += layer._features.size;
+                sharedVectorFeatures += layer._features.size;
                 layerCount += 1;
+            }
+
+            if (layer.markersSource?.getFeatures) {
+                markerFeatures += layer.markersSource.getFeatures().length || 0;
+            }
+
+            if (layer.featureRepresentations) {
+                const urnKeys = Object.keys(layer.featureRepresentations);
+                featureRepUrns += urnKeys.length;
+                featureRepInstances += urnKeys.reduce((sum, urn) => {
+                    const reps = layer.featureRepresentations[urn];
+                    return sum + (Array.isArray(reps) ? reps.length : 0);
+                }, 0);
             }
         }
 
+        const totalCachedFeatures = sharedVectorFeatures + markerFeatures;
+        const representationCoveragePct = totalCachedFeatures > 0
+            ? Number(((featureRepInstances / totalCachedFeatures) * 100).toFixed(1))
+            : null;
+        const cachePressureRatio = featureRepInstances > 0
+            ? Number((totalCachedFeatures / featureRepInstances).toFixed(2))
+            : null;
+
         return {
-            featureCount,
+            // Keep existing field for export compatibility.
+            featureCount: sharedVectorFeatures,
+            sharedVectorFeatures,
+            markerFeatures,
+            totalCachedFeatures,
+            featureRepUrns,
+            featureRepInstances,
+            representationCoveragePct,
+            cachePressureRatio,
             layerCount,
-            estimatedMemoryMB: Number(((featureCount * 2) / 1024).toFixed(1)),
+            estimatedMemoryMB: Number(((totalCachedFeatures * 2) / 1024).toFixed(1)),
         };
     }
 
@@ -411,15 +443,22 @@
         };
     }
 
-    function buildPerformanceUI(snapshot, sessionStartMs, storedSessionCount) {
+    function buildPerformanceUI(snapshot, sessionStartMs, storedSessionCount, session) {
         const counters = snapshot.counters;
         const network = snapshot.network;
         const longTasks = snapshot.longTasks;
+        const vectorCache = snapshot.vectorCache;
         const statusPerMove = counters.moveend > 0 ? counters.statusBusy / counters.moveend : null;
         const renderPerMove = counters.moveend > 0 ? counters.rendercomplete / counters.moveend : null;
         const failedRate = counters.requestTotal > 0
             ? Number(((counters.requestFailed / counters.requestTotal) * 100).toFixed(1))
             : 0;
+
+        const firstSample = Array.isArray(session?.samples) && session.samples.length ? session.samples[0] : null;
+        const elapsedMin = Math.max(0, (Date.now() - sessionStartMs) / 60000);
+        const vectorGrowthRatePerMin = firstSample && elapsedMin >= 1
+            ? Number(((vectorCache.totalCachedFeatures - firstSample.vectorCache.totalCachedFeatures) / elapsedMin).toFixed(1))
+            : null;
 
         const statusRisk = statusPerMove !== null && statusPerMove > 3;
         const renderRisk = renderPerMove !== null && renderPerMove > 2.5;
@@ -475,8 +514,10 @@
                             <li><span class="myw-perf-k">Canvas count</span><span class="myw-perf-v">${snapshot.canvasCount}</span></li>
                             <li><span class="myw-perf-k">DOM nodes</span><span class="myw-perf-v">${snapshot.domNodeCount}</span></li>
                             <li><span class="myw-perf-k">Basemap cache tiles</span><span class="myw-perf-v">${snapshot.basemapCacheTiles === null ? 'n/a' : snapshot.basemapCacheTiles}</span></li>
-                            <li><span class="myw-perf-k">Vector features</span><span class="myw-perf-v">${snapshot.vectorCache.featureCount}</span></li>
-                            <li><span class="myw-perf-k">Vector layers</span><span class="myw-perf-v">${snapshot.vectorCache.layerCount}</span></li>
+                            <li><span class="myw-perf-k">Vector cached (shared + markers)</span><span class="myw-perf-v">${vectorCache.totalCachedFeatures} (${vectorCache.sharedVectorFeatures} + ${vectorCache.markerFeatures})</span></li>
+                            <li><span class="myw-perf-k">Feature reps (URNs / instances)</span><span class="myw-perf-v">${vectorCache.featureRepUrns} / ${vectorCache.featureRepInstances}</span></li>
+                            <li><span class="myw-perf-k">Rep coverage / pressure</span><span class="myw-perf-v">${vectorCache.representationCoveragePct === null ? '-' : `${vectorCache.representationCoveragePct}%`} / ${vectorCache.cachePressureRatio === null ? '-' : vectorCache.cachePressureRatio}</span></li>
+                            <li><span class="myw-perf-k">Vector growth rate</span><span class="myw-perf-v">${vectorGrowthRatePerMin === null ? '-' : `${vectorGrowthRatePerMin > 0 ? '+' : ''}${vectorGrowthRatePerMin} features/min`}</span></li>
                         </ul>
                     </div>
                     <div class="myw-perf-card">
@@ -758,7 +799,7 @@
         function renderTab() {
             if (!tabContainer) return;
             const snapshot = getCurrentSnapshot();
-            const html = buildPerformanceUI(snapshot, sessionStartMs, loadSessions().length);
+            const html = buildPerformanceUI(snapshot, sessionStartMs, loadSessions().length, session);
             tabContainer.innerHTML = html;
             bindTabButtons();
         }
@@ -926,6 +967,13 @@
                     canvasCount: sample.canvasCount,
                     basemapCacheTiles: sample.basemapCacheTiles,
                     vectorCacheFeatures: sample.vectorCache.featureCount,
+                    vectorSharedFeatures: sample.vectorCache.sharedVectorFeatures,
+                    vectorMarkerFeatures: sample.vectorCache.markerFeatures,
+                    vectorTotalCached: sample.vectorCache.totalCachedFeatures,
+                    featureRepUrns: sample.vectorCache.featureRepUrns,
+                    featureRepInstances: sample.vectorCache.featureRepInstances,
+                    repCoveragePct: sample.vectorCache.representationCoveragePct,
+                    cachePressureRatio: sample.vectorCache.cachePressureRatio,
                     vectorCacheLayers: sample.vectorCache.layerCount,
                     requestTotal: sample.counters.requestTotal,
                     requestFailed: sample.counters.requestFailed,
