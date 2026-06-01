@@ -195,12 +195,34 @@
         return counts;
     }
 
-    function getBrowserMemoryMB() {
-        return performance.memory ? Number((performance.memory.usedJSHeapSize / 1048576).toFixed(1)) : null;
+    function toMB(bytes) {
+        return Number.isFinite(bytes) ? Number((bytes / 1048576).toFixed(1)) : null;
+    }
+
+    function getBrowserMemoryStats() {
+        const memory = performance?.memory;
+        if (!memory) {
+            return {
+                usedMB: null,
+                totalMB: null,
+                limitMB: null,
+                source: 'unavailable',
+            };
+        }
+        return {
+            usedMB: toMB(memory.usedJSHeapSize),
+            totalMB: toMB(memory.totalJSHeapSize),
+            limitMB: toMB(memory.jsHeapSizeLimit),
+            source: 'performance.memory',
+        };
     }
 
     function getCanvasCount() {
         return document.querySelectorAll('canvas').length;
+    }
+
+    function getDomNodeCount() {
+        return document.querySelectorAll('*').length;
     }
 
     function getBasemapCacheTiles(map) {
@@ -359,11 +381,14 @@
             ? Number((networkState.requestDurationsTotalMs / totalRequests).toFixed(1))
             : null;
 
+        const browserMemory = getBrowserMemoryStats();
+
         return {
             at: new Date().toISOString(),
             counters: { ...counters },
-            browserMemoryMB: getBrowserMemoryMB(),
+            browserMemory,
             canvasCount: getCanvasCount(),
+            domNodeCount: getDomNodeCount(),
             basemapCacheTiles: getBasemapCacheTiles(map),
             vectorCache: getVectorCacheSummary(map),
             appListeners: countListeners(app._events, LISTENER_KEYS),
@@ -446,8 +471,9 @@
                     <div class="myw-perf-card">
                         <h4>Memory and Caches</h4>
                         <ul class="myw-perf-list">
-                            <li><span class="myw-perf-k">JS heap</span><span class="myw-perf-v">${snapshot.browserMemoryMB === null ? 'n/a' : `${snapshot.browserMemoryMB} MB`}</span></li>
+                            <li><span class="myw-perf-k">JS heap used / total</span><span class="myw-perf-v">${snapshot.browserMemory.usedMB === null ? 'n/a' : `${snapshot.browserMemory.usedMB} / ${snapshot.browserMemory.totalMB === null ? '-' : snapshot.browserMemory.totalMB} MB`}</span></li>
                             <li><span class="myw-perf-k">Canvas count</span><span class="myw-perf-v">${snapshot.canvasCount}</span></li>
+                            <li><span class="myw-perf-k">DOM nodes</span><span class="myw-perf-v">${snapshot.domNodeCount}</span></li>
                             <li><span class="myw-perf-k">Basemap cache tiles</span><span class="myw-perf-v">${snapshot.basemapCacheTiles === null ? 'n/a' : snapshot.basemapCacheTiles}</span></li>
                             <li><span class="myw-perf-k">Vector features</span><span class="myw-perf-v">${snapshot.vectorCache.featureCount}</span></li>
                             <li><span class="myw-perf-k">Vector layers</span><span class="myw-perf-v">${snapshot.vectorCache.layerCount}</span></li>
@@ -893,7 +919,10 @@
                     statusBusy: sample.counters.statusBusy,
                     showStatus: sample.counters.showStatus,
                     hideStatus: sample.counters.hideStatus,
-                    browserMemoryMB: sample.browserMemoryMB,
+                    browserMemoryUsedMB: sample.browserMemory?.usedMB ?? null,
+                    browserMemoryTotalMB: sample.browserMemory?.totalMB ?? null,
+                    browserMemoryLimitMB: sample.browserMemory?.limitMB ?? null,
+                    domNodeCount: sample.domNodeCount,
                     canvasCount: sample.canvasCount,
                     basemapCacheTiles: sample.basemapCacheTiles,
                     vectorCacheFeatures: sample.vectorCache.featureCount,
