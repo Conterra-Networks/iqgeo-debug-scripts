@@ -1,0 +1,18 @@
+{
+  "allowRoles": [],
+  "denyRoles": [],
+  "scripts": [
+    {
+      "id": "listener-monitor",
+      "enabled": false,
+      "url": "https://raw.githubusercontent.com/Conterra-Networks/iqgeo-debug-scripts/main/listener-monitor.js"
+    },
+    {
+      "id": "iqgeo-perf-metrics-collector",
+      "enabled": true,
+      "allowRoles": [],
+      "denyRoles": [],
+      "url": "https://raw.githubusercontent.com/Conterra-Networks/iqgeo-debug-scripts/main/iqgeo-perf-metrics-collector.js"
+    }
+  ]
+}
