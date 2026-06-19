@@ -5,7 +5,7 @@
     const STORAGE_KEY = 'myw_perf_metrics_sessions';
     const STORAGE_VERSION_KEY = 'myw_perf_metrics_payload_version';
     const AUTO_OPEN_PERFORMANCE_KEY = 'myw_perf_metrics_auto_open';
-    const PAYLOAD_VERSION = 6;
+    const PAYLOAD_VERSION = 7;
     const MAX_SESSIONS = 20;
 
     // UI and timers
@@ -13,7 +13,7 @@
     const TAB_TITLE = 'Performance';
     const SAMPLE_MS = 5000;
     const UI_REFRESH_MS = 5000;
-    const DOCUMENT_HIDDEN_GRACE_MS = 2000;
+    const DOCUMENT_HIDDEN_GRACE_MS = 10000;
 
     // Retention and ranking limits
     const MAX_SESSION_SAMPLES = 360; // 30 mins at 5s intervals
@@ -38,7 +38,17 @@
         'database-view-changed',
         'featureCollection-modified',
     ];
-    const MAP_LISTENER_KEYS = ['rendercomplete', 'movestart', 'moveend', 'prerender', 'postrender'];
+    const MAP_LISTENER_KEYS = [
+        'rendercomplete',
+        'movestart',
+        'moveend',
+        'prerender',
+        'postrender',
+        'baselayerchange',
+        'pointermove',
+        'zoomend',
+        'contextmenu',
+    ];
 
     const STATUS_CLASS_KEYS = ['2xx', '3xx', '4xx', '5xx', 'error', 'other'];
 
@@ -412,6 +422,7 @@
             totalLayerCount: backgroundLayerCount + userLayerCount,
             userLayerCount,
             backgroundLayerCount,
+            layerManagerLayerCount: Object.keys(map?.layerManager?.layers || {}).length,
         };
     }
 
@@ -605,6 +616,7 @@
                 label: stats.label,
                 displayLabel: stats.displayLabel || stats.label,
                 type: stats.type,
+                sourceType: stats.sourceType || 'unknown',
                 count: stats.count,
             }))
             .sort((a, b) => b.count - a.count)
@@ -785,14 +797,14 @@
         const slowRisk = counters.requestSlow > 0;
 
         const sectionHelp = {
-            mapActivity: 'Move start fires when map movement begins; move end fires when it settles. They are often equal, but can differ while movement is still in progress or if an interaction is interrupted. Render counts are layer postrender events: user layers, background basemap, and total.',
+            mapActivity: 'Move start fires when map movement begins; move end fires when it settles. They are often equal, but can differ while movement is still in progress or if an interaction is interrupted. Render counts are layer postrender events: user layers, background basemap, geometry-edit overlays (temporary editing overlays), and total.',
             statusChurn: 'Tracks app loading-status calls (statusBusy, showStatus, hideStatus) triggered during work such as render/data updates. They are often equal in steady flows; differences can indicate overlapping operations, delayed clears, or paths that show status but do not clear it yet. Keep this section when diagnosing spinner churn.',
             memoryCaches: 'JS heap is browser memory from performance.memory (usedJSHeapSize / totalJSHeapSize). Vector features are cached map features. Shared vectors are features kept in shared vector-layer caches. Marker features are marker/pin-style features from markersSource (for example location pins and marker overlays). Feature reps are rendered representation objects for cached vector features, not the raw features themselves.',
             network: 'Request volume, failures, latency, and near-repeat checks. p95 is the latency value that 95% of requests are at or below. Recent repeats counts same method+endpoint seen in the last 5 requests; recent exact repeats requires endpoint plus matching request and response hashes.',
             longTasks: 'Main-thread work over 50 ms observed through PerformanceObserver longtask entries.',
-            listeners: 'Active event listeners on the app and map at sample time.',
+            listeners: 'Active event listeners on the app and map at sample time. Includes movement, rendering, basemap, and interaction listener buckets for map-level churn checks.',
             topEndpoints: 'Requests grouped by endpoint path. Avg and p95 are computed from the request durations seen in this session.',
-            topLayers: 'Rendered layers grouped by resolved layer name or basemap name. Share is each layer count divided by total rendercomplete events.',
+            topLayers: `Top rendered layers only, limited to ${TOP_LAYER_LIMIT} entries that have emitted at least one tracked postrender event. Share is each layer count divided by total rendercomplete events. Enabled layers with no tracked renders yet, filtered layers, or lower-ranked layers beyond the top ${TOP_LAYER_LIMIT} are not shown.`,
         };
 
         const endpointRows = network.topEndpointPerformance.length
@@ -814,15 +826,17 @@
                 const layerLabel = item.displayLabel && item.label && item.displayLabel !== item.label
                     ? `${item.displayLabel} (${item.label})`
                     : (item.displayLabel || item.label);
+                const typeLabel = item.type === 'interactionOverlay' ? 'geometryEdit' : item.type;
                 return `
                 <tr>
                     <td>${layerLabel}</td>
-                    <td class="myw-col-type-cell">${item.type}</td>
+                    <td class="myw-col-type-cell">${typeLabel}</td>
+                    <td class="myw-col-type-cell">${item.sourceType}</td>
                     <td class="myw-num">${item.count}</td>
                     <td class="myw-num">${sharePct}%</td>
                 </tr>`;
             }).join('')
-            : '<tr><td colspan="4">No layer postrender events captured yet.</td></tr>';
+            : '<tr><td colspan="5">No layer postrender events captured yet.</td></tr>';
 
         return `
             <div id="myw-performance-root">
@@ -843,9 +857,11 @@
                         <ul class="myw-perf-list">
                             ${metricRow('Move start', counters.movestart)}
                             ${metricRow('Move end', counters.moveend)}
+                            ${metricRow('Baselayer change', counters.baselayerchange)}
                             ${metricRow('Layer renders', counters.rendercomplete)}
                             ${metricRow('User', counters.rendercompleteUser, { breakdown: true })}
                             ${metricRow('Background', counters.rendercompleteBackground, { breakdown: true })}
+                            ${metricRow('Geometry Edit', counters.rendercompleteInteractionOverlay, { breakdown: true })}
                             ${metricRow('Render per move', renderPerMove === null ? '-' : renderPerMove.toFixed(2), { valueClass: computeFlagClass(renderRisk) })}
                         </ul>
                     </div>
@@ -868,6 +884,7 @@
                             ${metricRow('Layers', layerSummary.totalLayerCount)}
                             ${metricRow('User', layerSummary.userLayerCount, { breakdown: true })}
                             ${metricRow('Background', layerSummary.backgroundLayerCount, { breakdown: true })}
+                            ${metricRow('LayerManager', layerSummary.layerManagerLayerCount, { breakdown: true })}
                             ${metricRow('Vector features', vectorCache.totalCachedFeatures)}
                             ${metricRow('Shared', vectorCache.sharedVectorFeatures, { breakdown: true })}
                             ${metricRow('Markers', vectorCache.markerFeatures, { breakdown: true })}
@@ -902,6 +919,8 @@
                         <ul class="myw-perf-list">
                             ${metricRow('App listeners', Object.values(snapshot.appListeners).reduce((sum, value) => sum + value, 0))}
                             ${metricRow('Map listeners', Object.values(snapshot.mapListeners).reduce((sum, value) => sum + value, 0))}
+                            ${metricRow('baselayerchange', snapshot.mapListeners.baselayerchange)}
+                            ${metricRow('pointermove', snapshot.mapListeners.pointermove)}
                             ${metricRow('featureCollection-modified', snapshot.appListeners['featureCollection-modified'])}
                             ${metricRow('currentFeature-changed', snapshot.appListeners['currentFeature-changed'])}
                         </ul>
@@ -929,11 +948,12 @@
                         <tbody>${endpointRows}</tbody>
                     </table>
                 </div>
-                <div class="myw-section-gap">${sectionHeader('Top Layers This Session', sectionHelp.topLayers)}</div>
+                <div class="myw-section-gap">${sectionHeader(`Top ${TOP_LAYER_LIMIT} Layers This Session`, sectionHelp.topLayers)}</div>
                 <div class="myw-table-wrap">
                     <table class="myw-perf-layers">
                         <colgroup>
                             <col class="myw-col-layer-name" />
+                            <col class="myw-col-type" />
                             <col class="myw-col-type" />
                             <col class="myw-col-num" />
                             <col class="myw-col-num" />
@@ -942,6 +962,7 @@
                             <tr>
                                 <th>Layer</th>
                                 <th class="myw-col-type-cell">Type</th>
+                                <th class="myw-col-type-cell">Source</th>
                                 <th class="myw-num">Renders</th>
                                 <th class="myw-num">Share</th>
                             </tr>
@@ -963,8 +984,10 @@
             rendercomplete: 0,
             rendercompleteUser: 0,
             rendercompleteBackground: 0,
+            rendercompleteInteractionOverlay: 0,
             movestart: 0,
             moveend: 0,
+            baselayerchange: 0,
             statusBusy: 0,
             showStatus: 0,
             hideStatus: 0,
@@ -1038,9 +1061,16 @@
             statusBusy: typeof app.statusBusy === 'function' ? app.statusBusy.bind(app) : null,
             showStatus: typeof layout?.showStatus === 'function' ? layout.showStatus.bind(layout) : null,
             hideStatus: typeof layout?.hideStatus === 'function' ? layout.hideStatus.bind(layout) : null,
+            setCurrentBaseMap: typeof map.setCurrentBaseMap === 'function' ? map.setCurrentBaseMap.bind(map) : null,
             fetch: typeof window.fetch === 'function' ? window.fetch.bind(window) : null,
             xhrOpen: XMLHttpRequest.prototype.open,
             xhrSend: XMLHttpRequest.prototype.send,
+        };
+
+        const basemapState = {
+            currentName: map?.getCurrentBaseMap?.()?.display_name || map?._currentBaseMap?.display_name || null,
+            lastRecordedName: null,
+            lastRecordedAt: 0,
         };
 
         const longTaskObserver = (() => {
@@ -1065,6 +1095,35 @@
             return layer?.getSource?.() || null;
         }
 
+        function getLayerSourceType(layer) {
+            return getLayerSource(layer)?.constructor?.name || 'no-source';
+        }
+
+        function getLayerManagerEntries() {
+            return Object.values(map?.layerManager?.layers || {});
+        }
+
+        function shouldTrackSeparateMarkersLayer(ownerLayer) {
+            if (!ownerLayer?.markersLayer) return false;
+            // Some layer classes already proxy marker-only postrender events to the parent.
+            return typeof ownerLayer._postMarkersRenderListener !== 'function';
+        }
+
+        function getLayerManagerMatch(layer) {
+            const source = getLayerSource(layer);
+            const entries = getLayerManagerEntries();
+            for (const entry of entries) {
+                if (!entry) continue;
+                if (entry.maplibLayer === layer) return entry;
+                if (entry.maplibLayer?.markersLayer === layer) return entry;
+                const entrySource = entry.maplibLayer?.getSource?.();
+                if (source && entrySource === source) return entry;
+                const entryMarkersSource = entry.maplibLayer?.markersLayer?.getSource?.();
+                if (source && entryMarkersSource === source) return entry;
+            }
+            return null;
+        }
+
         function getSourceLabel(source) {
             if (!source) return 'no-source';
             try {
@@ -1084,13 +1143,110 @@
             return source?.constructor?.name || 'unknown-source';
         }
 
+        function getLayerOptionName(layer) {
+            const name = layer?.options?.name;
+            return typeof name === 'string' && name.trim() ? name.trim() : null;
+        }
+
+        function collectCompositeLayerNames(holder) {
+            const names = [];
+            if (!Array.isArray(holder?.layers)) return names;
+            for (const childLayer of holder.layers) {
+                const candidate =
+                    childLayer?.layerDef?.display_name ||
+                    childLayer?.layerDef?.name ||
+                    childLayer?.options?.name;
+                if (typeof candidate === 'string' && candidate.trim()) {
+                    names.push(candidate.trim());
+                }
+            }
+            return names;
+        }
+
+        function getCompositeLayerNames(layer) {
+            const values = [
+                ...collectCompositeLayerNames(layer),
+                ...collectCompositeLayerNames(getLayerSource(layer)),
+            ];
+            return [...new Set(values)];
+        }
+
+        function getSourceFeatureCount(layer) {
+            const source = getLayerSource(layer);
+            if (!source || typeof source.getFeatures !== 'function') return 0;
+            try {
+                return source.getFeatures().length || 0;
+            } catch (_) {
+                return 0;
+            }
+        }
+
+        function getMarkersCount(layer) {
+            if (!layer?.markersSource?.getFeatures) return 0;
+            try {
+                return layer.markersSource.getFeatures().length || 0;
+            } catch (_) {
+                return 0;
+            }
+        }
+
+        function getSharedFeatureCount(layer) {
+            return layer?._features instanceof Map ? layer._features.size : 0;
+        }
+
+        function hasMeaningfulLayerPayload(layer) {
+            if (getLayerOptionName(layer)) return true;
+            if (getCompositeLayerNames(layer).length > 0) return true;
+            if (getSharedFeatureCount(layer) > 0) return true;
+            if (getMarkersCount(layer) > 0) return true;
+            if (getSourceFeatureCount(layer) > 0) return true;
+            return false;
+        }
+
+        function isGeomDrawOverlay(layer) {
+            if (!layer) return false;
+            const ctor = layer?.constructor?.name;
+            const zIndex = layer?.getZIndex?.() ?? layer?.values_?.zIndex;
+            if (ctor !== 'GeoJSONVectorLayer') return false;
+            if (zIndex !== 200) return false;
+            const optName = getLayerOptionName(layer);
+            if (optName === 'GeoJSONVectorLayer') return true;
+            return !getLayerManagerMatch(layer)?.layerDef && !getVisibleLayerMatch(layer)?.layerDef;
+        }
+
+        function classifyRenderLayer(layer) {
+            if (isGeomDrawOverlay(layer)) return 'interactionOverlay';
+            if (isBackgroundLayer(layer)) return 'background';
+            if (getLayerManagerMatch(layer)?.layerDef) return 'business';
+            if (getVisibleLayerMatch(layer)?.layerDef) return 'business';
+            return 'internal';
+        }
+
+        function shouldTrackRenderLayer(layer) {
+            if (!layer || typeof layer.on !== 'function') return false;
+            const classification = classifyRenderLayer(layer);
+            if (classification === 'background' || classification === 'business') return true;
+            if (classification === 'interactionOverlay') return true;
+            if (hasMeaningfulLayerPayload(layer)) return true;
+            return false;
+        }
+
+        function getInternalLayerLabel(layer) {
+            const ctor = layer?.constructor?.name || 'layer';
+            const uid = layer?.ol_uid || getLayerObjectId(layer);
+            const zIndex = layer?.getZIndex?.() ?? layer?.values_?.zIndex;
+            return zIndex == null ? `${ctor}#${uid}` : `${ctor}#${uid}@z${zIndex}`;
+        }
+
         function getVisibleLayerMatch(layer) {
             const visibleLayers = map?.getVisibleLayers?.() ?? [];
             const source = getLayerSource(layer);
             return visibleLayers.find(item => {
                 if (item?.maplibLayer === layer) return true;
+                if (item?.maplibLayer?.markersLayer === layer) return true;
                 const itemSource = item?.maplibLayer?.getSource?.();
-                return !!source && itemSource === source;
+                const itemMarkersSource = item?.maplibLayer?.markersLayer?.getSource?.();
+                return !!source && (itemSource === source || itemMarkersSource === source);
             }) || null;
         }
 
@@ -1116,18 +1272,50 @@
         }
 
         function getUserLayerName(layer) {
+            const managerMatched = getLayerManagerMatch(layer);
+            if (managerMatched?.layerDef?.name) return managerMatched.layerDef.name;
+
             const matched = getVisibleLayerMatch(layer);
             if (matched?.layerDef?.name) return matched.layerDef.name;
+
+            const optionName = getLayerOptionName(layer);
+            if (optionName) return optionName;
+
+            const compositeNames = getCompositeLayerNames(layer);
+            if (compositeNames.length) {
+                return compositeNames.length === 1
+                    ? compositeNames[0]
+                    : `composite:${compositeNames.slice(0, 4).join('|')}${compositeNames.length > 4 ? '|...' : ''}`;
+            }
+
             const sourceLabel = getSourceLabel(getLayerSource(layer));
-            if (sourceLabel !== 'unresolved-vector-source') return sourceLabel;
+            const internalLabel = getInternalLayerLabel(layer);
+            if (sourceLabel !== 'unresolved-vector-source') {
+                return sourceLabel ? `${internalLabel}:${sourceLabel}` : internalLabel;
+            }
             const sourceType = getLayerSource(layer)?.constructor?.name || 'unknown-source';
             return `unresolved-vector-source#${getLayerObjectId(layer)}:${sourceType}`;
         }
 
         function getUserLayerDisplayName(layer) {
+            const managerMatched = getLayerManagerMatch(layer);
+            if (managerMatched?.layerDef?.display_name) return managerMatched.layerDef.display_name;
+            if (managerMatched?.layerDef?.name) return managerMatched.layerDef.name;
+
             const matched = getVisibleLayerMatch(layer);
             if (matched?.layerDef?.display_name) return matched.layerDef.display_name;
             if (matched?.layerDef?.name) return matched.layerDef.name;
+
+            const optionName = getLayerOptionName(layer);
+            if (optionName) return optionName;
+
+            const compositeNames = getCompositeLayerNames(layer);
+            if (compositeNames.length) {
+                return compositeNames.length === 1
+                    ? compositeNames[0]
+                    : `${compositeNames.slice(0, 4).join(', ')}${compositeNames.length > 4 ? ', ...' : ''}`;
+            }
+
             return getUserLayerName(layer);
         }
 
@@ -1141,16 +1329,33 @@
         }
 
         function trackLayerRender(layer) {
-            const isBackground = isBackgroundLayer(layer);
-            const type = isBackground ? 'background' : 'user';
-            const label = isBackground ? getBackgroundLayerName(layer) : getUserLayerName(layer);
-            const displayLabel = isBackground ? label : getUserLayerDisplayName(layer);
+            const classification = classifyRenderLayer(layer);
+            let type, label, displayLabel;
+
+            if (classification === 'background') {
+                type = 'background';
+                label = getBackgroundLayerName(layer);
+                displayLabel = label;
+            } else if (classification === 'interactionOverlay') {
+                type = 'interactionOverlay';
+                label = 'Geometry Edit';
+                displayLabel = label;
+            } else {
+                type = 'user';
+                label = getUserLayerName(layer);
+                displayLabel = getUserLayerDisplayName(layer);
+            }
+
+            const sourceType = getLayerSourceType(layer);
             const key = `${type}:${label}`;
             if (!layerRenderState.stats[key]) {
-                layerRenderState.stats[key] = { label, displayLabel, type, count: 0 };
+                layerRenderState.stats[key] = { label, displayLabel, type, sourceType, count: 0, classification };
             }
             if (!layerRenderState.stats[key].displayLabel) {
                 layerRenderState.stats[key].displayLabel = displayLabel;
+            }
+            if (!layerRenderState.stats[key].sourceType || layerRenderState.stats[key].sourceType === 'unknown') {
+                layerRenderState.stats[key].sourceType = sourceType;
             }
             layerRenderState.stats[key].count += 1;
         }
@@ -1160,7 +1365,7 @@
             const seen = new Set();
 
             const addTarget = (layer) => {
-                if (!layer || typeof layer.on !== 'function') return;
+                if (!shouldTrackRenderLayer(layer)) return;
                 if (seen.has(layer)) return;
                 seen.add(layer);
                 targets.push(layer);
@@ -1168,6 +1373,11 @@
 
             for (const layer of map?.getLayers?.().getArray?.() ?? []) addTarget(layer);
             for (const baseMap of Object.values(map?.baseMaps ?? {})) addTarget(baseMap?.maplibLayer);
+            for (const entry of getLayerManagerEntries()) {
+                const ownerLayer = entry?.maplibLayer;
+                if (!ownerLayer) continue;
+                if (shouldTrackSeparateMarkersLayer(ownerLayer)) addTarget(ownerLayer.markersLayer);
+            }
             addTarget(map?.getCurrentBaseMap?.()?.maplibLayer);
             addTarget(map?._currentBaseMap?.maplibLayer);
 
@@ -1186,7 +1396,9 @@
                 if (!layer || renderLayerHooks.has(layer) || typeof layer.on !== 'function') continue;
                 const onPostRender = () => {
                     counters.rendercomplete += 1;
-                    if (isBackgroundLayer(layer)) counters.rendercompleteBackground += 1;
+                    const classification = classifyRenderLayer(layer);
+                    if (classification === 'background') counters.rendercompleteBackground += 1;
+                    else if (classification === 'interactionOverlay') counters.rendercompleteInteractionOverlay += 1;
                     else counters.rendercompleteUser += 1;
                     trackLayerRender(layer);
                 };
@@ -1281,6 +1493,28 @@
             layout.hideStatus = function patchedHideStatus(...args) {
                 counters.hideStatus += 1;
                 return original.hideStatus(...args);
+            };
+        }
+        function recordBaseMapChange(nextName) {
+            if (!nextName) return;
+
+            const now = Date.now();
+            if (basemapState.currentName === nextName) {
+                if (basemapState.lastRecordedName === nextName && now - basemapState.lastRecordedAt < 1000) return;
+                return;
+            }
+
+            basemapState.currentName = nextName;
+            basemapState.lastRecordedName = nextName;
+            basemapState.lastRecordedAt = now;
+            counters.baselayerchange += 1;
+        }
+
+        if (original.setCurrentBaseMap) {
+            map.setCurrentBaseMap = async function patchedSetCurrentBaseMap(...args) {
+                const result = await original.setCurrentBaseMap(...args);
+                recordBaseMapChange(map?.getCurrentBaseMap?.()?.display_name || map?._currentBaseMap?.display_name || args[0] || null);
+                return result;
             };
         }
 
@@ -1400,9 +1634,13 @@
 
         const onMoveStart = () => { counters.movestart += 1; };
         const onMoveEnd = () => { counters.moveend += 1; };
+        const onBaseLayerChange = (event) => {
+            recordBaseMapChange(event?.layer?.display_name || event?.layer?.name || null);
+        };
 
         map.on('movestart', onMoveStart);
         map.on('moveend', onMoveEnd);
+        map.on('baselayerchange', onBaseLayerChange);
         bindRenderLayerHooks();
 
         function takeSample() {
@@ -1599,6 +1837,7 @@
             stopUiTimer();
             map.un('movestart', onMoveStart);
             map.un('moveend', onMoveEnd);
+            map.un('baselayerchange', onBaseLayerChange);
             document.removeEventListener('visibilitychange', handleDocumentVisibilityChange);
 
             for (const [layer, onPostRender] of renderLayerHooks.entries()) {
@@ -1609,6 +1848,7 @@
             if (original.statusBusy) app.statusBusy = original.statusBusy;
             if (original.showStatus) layout.showStatus = original.showStatus;
             if (original.hideStatus) layout.hideStatus = original.hideStatus;
+            if (original.setCurrentBaseMap) map.setCurrentBaseMap = original.setCurrentBaseMap;
             if (original.fetch) window.fetch = original.fetch;
             XMLHttpRequest.prototype.open = original.xhrOpen;
             XMLHttpRequest.prototype.send = original.xhrSend;
@@ -1663,10 +1903,16 @@
         }
 
         async function exportReport() {
+            const storedSessions = loadSessions();
+            const currentSessionSummary = stripSamplesForStorage(session);
             const payload = {
                 version: PAYLOAD_VERSION,
                 exportedAt: new Date().toISOString(),
                 exportedBy: userIdentity,
+                exportedSessionCount: storedSessions.length,
+                // Historical sessions are stored as summaries to stay within localStorage limits.
+                sessions: storedSessions,
+                currentSessionSummary,
                 session,
                 current: getCurrentSnapshot(),
             };
@@ -1747,6 +1993,7 @@
                     rendercompleteBackground: sample.counters.rendercompleteBackground,
                     movestart: sample.counters.movestart,
                     moveend: sample.counters.moveend,
+                    baselayerchange: sample.counters.baselayerchange,
                     statusBusy: sample.counters.statusBusy,
                     showStatus: sample.counters.showStatus,
                     hideStatus: sample.counters.hideStatus,
@@ -1781,6 +2028,7 @@
                     nearRepeatExactPct: sample.network.nearConsecutiveRepeats.exactPayloadAndResponsePct,
                     topRenderLayer: sample.layerRenders?.[0]?.label ?? null,
                     topRenderLayerType: sample.layerRenders?.[0]?.type ?? null,
+                    topRenderLayerSourceType: sample.layerRenders?.[0]?.sourceType ?? null,
                     topRenderLayerCount: sample.layerRenders?.[0]?.count ?? null,
                     longTaskCount: sample.longTasks.count,
                 })));
